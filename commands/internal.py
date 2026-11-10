@@ -1,3 +1,5 @@
+__author__ = 'lahav pelts'
+
 """
 commands/internal.py  -  Internal commands
 ===========================================

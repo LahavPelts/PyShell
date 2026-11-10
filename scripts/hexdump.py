@@ -1,3 +1,5 @@
+__author__ = 'lahav pelts'
+
 """
 hexdump.py  -  Display every byte of a binary file in hexadecimal
 ==================================================================

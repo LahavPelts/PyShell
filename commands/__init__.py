@@ -1,3 +1,5 @@
+__author__ = 'lahav pelts'
+
 # commands package - exports all command classes
 from .base import Command, InternalCommand
 from .internal import (

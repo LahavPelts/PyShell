@@ -1,3 +1,5 @@
+__author__ = 'lahav pelts'
+
 """
 hello.py  -  Simple greeting script
 =====================================

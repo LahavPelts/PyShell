@@ -1,3 +1,5 @@
+__author__ = 'lahav pelts'
+
 """
 countLines.py  -  Read from stdin and count lines
 ===================================================

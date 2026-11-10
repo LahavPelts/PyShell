@@ -1,3 +1,5 @@
+__author__ = 'lahav pelts'
+
 """
 parser.py  -  Command line parser
 ===================================

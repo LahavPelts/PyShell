@@ -1,3 +1,5 @@
+__author__ = 'lahav pelts'
+
 """
 printToScreen.py  -  Print several lines to the screen
 ========================================================

@@ -1,3 +1,5 @@
+__author__ = 'lahav pelts'
+
 """
 grep.py  -  Regex search in a file or stdin
 =============================================

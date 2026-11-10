@@ -1,3 +1,5 @@
+__author__ = 'lahav pelts'
+
 """
 commands/base.py  -  Base command classes
 ==========================================

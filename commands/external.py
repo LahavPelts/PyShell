@@ -1,3 +1,5 @@
+__author__ = 'lahav pelts'
+
 """
 commands/external.py  -  External commands (each one starts a NEW process)
 ===========================================================================

@@ -1,3 +1,5 @@
+__author__ = 'lahav pelts'
+
 """
 shell.py  -  PyShell: a simple Windows shell written in Python
 ===============================================================
