@@ -1,19 +1,13 @@
 """
-commands/external.py  -  External commands
-===========================================
-Three types of external commands:
+commands/external.py  -  External commands (each one starts a NEW process)
+===========================================================================
+ExternalCommand        - parent class: runs build_cmd() with subprocess.Popen
+  |-- ScriptCommand     - a .py script from MY_PATH   ->  python.exe script.py args
+  |-- CmdCommand        - a CMD built-in (copy, ren)  ->  cmd.exe /c copy a b
+  +-- ExecutableCommand - an .exe (ping, notepad)     ->  ping www.google.com
 
-  ScriptCommand     -  Python scripts from MY_PATH directories
-                       (runs with sys.executable, no need to type "python")
-  CmdCommand        -  CMD built-in commands (copy, ren, del, move...)
-                       (runs via shell=True so cmd.exe handles quoting)
-  ExecutableCommand -  EXE files from the Windows PATH
-                       (ping, notepad, calc, tasklist, find, findstr...)
-                       (runs via shell=True so quotes are preserved exactly)
-
-Each class implements:
-  build_cmd(args)  ->  the command string or list to pass to subprocess.Popen
-  execute(args)    ->  runs the command and returns a Popen object (for piping)
+The children only decide WHAT to run (build_cmd).
+The parent decides HOW to run it (execute). This is inheritance.
 """
 
 import sys
@@ -21,108 +15,50 @@ import subprocess
 from .base import Command
 
 
-def _strip_arg(s: str) -> str:
-    """Strip surrounding quotes from a single argument (internal helper)."""
-    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
-        return s[1:-1]
-    return s
+class ExternalCommand(Command):
+
+    def __init__(self, name):
+        self.name = name
+
+    def build_cmd(self, args):
+        """Return the command line to run. Each child class overrides this."""
+        raise NotImplementedError
+
+    def execute(self, args, stdin=None, stdout=None):
+        """
+        Start the process and return the Popen object WITHOUT waiting.
+        Not waiting is what lets all the commands in a pipe run in parallel.
+        stdin / stdout can be: None (keyboard/screen), an open file,
+        the previous process's output, or subprocess.PIPE.
+        """
+        return subprocess.Popen(self.build_cmd(args), stdin=stdin, stdout=stdout)
 
 
-class ScriptCommand(Command):
-    """
-    Runs a Python script found in one of the MY_PATH directories.
+class ScriptCommand(ExternalCommand):
+    """A Python script. We add python.exe so the user doesn't have to type it."""
 
-    Example:  hexdump.py abc.exe
-      ->  python.exe  <full-path-to-script>  abc.exe
-
-    Arguments are stripped of surrounding quotes before being passed to
-    the script (Python receives clean argv values).
-    """
-    name = "script"
-    description = "Python script"
-
-    def __init__(self, script_path: str):
+    def __init__(self, name, script_path):
+        super().__init__(name)
         self.script_path = script_path
 
-    def build_cmd(self, args: list) -> list:
-        """Build the full command list, stripping quotes from arguments."""
-        clean = [_strip_arg(a) for a in args]
-        return [sys.executable, self.script_path] + clean
-
-    def execute(self, args: list, stdin=None, stdout=None):
-        """Run the script with Popen and return the Popen object."""
-        proc = subprocess.Popen(
-            self.build_cmd(args),
-            stdin=stdin,
-            stdout=stdout,
-            text=True,
-        )
-        return proc
+    def build_cmd(self, args):
+        # sys.executable = the full path of the python.exe that runs our shell
+        return [sys.executable, self.script_path] + [self.unquote(a) for a in args]
 
 
-class CmdCommand(Command):
+class CmdCommand(ExternalCommand):
+    """A command that only exists inside cmd.exe (copy, ren, del...)."""
+
+    def build_cmd(self, args):
+        return "cmd.exe /c " + " ".join([self.name] + args)
+
+
+class ExecutableCommand(ExternalCommand):
     """
-    Runs a CMD built-in command (copy, ren, del, move...) using shell=True.
-
-    shell=True causes Python to invoke cmd.exe /c internally, which means
-    CMD handles quoting and built-in resolution correctly.
-
-    Example:  copy a.txt b.txt
-      ->  cmd.exe /c copy a.txt b.txt   (handled by shell=True)
+    A program (.exe). We pass the line as one string, so quotes stay exactly
+    as the user typed them (find "Teams" needs the quotes).
+    Windows itself searches the current folder and the PATH for the .exe.
     """
-    name = "cmd_builtin"
-    description = "CMD built-in command"
 
-    def __init__(self, cmd_name: str):
-        self.cmd_name = cmd_name
-
-    def build_cmd(self, args: list) -> str:
-        """Build the command as a string (quotes are preserved as typed)."""
-        return ' '.join([self.cmd_name] + args)
-
-    def execute(self, args: list, stdin=None, stdout=None):
-        """Run via shell=True so cmd.exe processes the command string."""
-        proc = subprocess.Popen(
-            self.build_cmd(args),
-            stdin=stdin,
-            stdout=stdout,
-            text=True,
-            shell=True,
-        )
-        return proc
-
-
-class ExecutableCommand(Command):
-    """
-    Runs an EXE file directly - Windows PATH resolves it automatically.
-
-    Examples:  ping, notepad, calc, tasklist, find, findstr, netstat...
-
-    Uses shell=True with a string so that quotes are preserved exactly as
-    the user typed them.  This is important for commands like find "Teams"
-    which require double quotes around the search string.
-    """
-    name = "executable"
-    description = "External executable"
-
-    def __init__(self, exe_name: str):
-        self.exe_name = exe_name
-
-    def build_cmd(self, args: list) -> str:
-        """Build the command as a string (original quotes preserved)."""
-        return ' '.join([self.exe_name] + args)
-
-    def execute(self, args: list, stdin=None, stdout=None):
-        """
-        Run the EXE with Popen + shell=True.
-        shell=True preserves quotes (e.g. find "Teams").
-        Returns a Popen object so the caller can build pipes.
-        """
-        proc = subprocess.Popen(
-            self.build_cmd(args),
-            stdin=stdin,
-            stdout=stdout,
-            text=True,
-            shell=True,
-        )
-        return proc
+    def build_cmd(self, args):
+        return " ".join([self.name] + args)

@@ -2,7 +2,6 @@
 from .base import Command, InternalCommand
 from .internal import (
     ExitCommand, HelpCommand, SetCommand, CdCommand,
-    DirCommand, EchoCommand, TypeCommand, ClsCommand,
-    MdCommand, TimeCommand,
+    DirCommand, EchoCommand, TypeCommand, MdCommand, TimeCommand,
 )
-from .external import ScriptCommand, CmdCommand, ExecutableCommand
+from .external import ExternalCommand, ScriptCommand, CmdCommand, ExecutableCommand

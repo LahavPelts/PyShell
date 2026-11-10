@@ -1,422 +1,213 @@
 """
-shell.py  -  PyShell: main Shell manager
-==========================================
-Entry point. Run with:  python shell.py
+shell.py  -  PyShell: a simple Windows shell written in Python
+===============================================================
+Run with:   python shell.py          (add --debug to see full error tracebacks)
 
-Architecture:
-  Shell          -  main class: loop, parsing, execution
-  |-- parser.py  -  command line parser (pipes, redirects, quotes)
-  +-- commands/  -  command class hierarchy
-      |-- base.py      Command, InternalCommand
-      |-- internal.py  ExitCommand, HelpCommand, SetCommand, CdCommand,
-      |                DirCommand, EchoCommand, TypeCommand, ClsCommand,
-      |                MdCommand, TimeCommand
-      +-- external.py  ScriptCommand, CmdCommand, ExecutableCommand
+Files:
+  shell.py             - the Shell class: prompt loop, finding commands, running them
+  parser.py            - splits a line into commands, | pipes, < and > redirects
+  commands/base.py     - Command, InternalCommand        (parent classes)
+  commands/internal.py - exit, help, set, cd, dir, type, echo, md, time
+  commands/external.py - ScriptCommand, CmdCommand, ExecutableCommand
 
-Command resolution order:
-  1. Internal command (runs inside Python)
-  2. .py script found in MY_PATH directories
-  3. CMD built-in command (shell=True -> cmd.exe /c)
-  4. External EXE (Windows PATH)
+How a command name is found (in this order):
+  1. Internal command   (dir, cd, set...)  -> runs inside Python, no new process
+  2. Python script      (hello.py)         -> searched in the MY_PATH folders
+  3. CMD built-in       (copy, ren...)     -> runs with  cmd.exe /c
+  4. Program            (ping, notepad...) -> Windows finds the .exe in PATH
 """
 
 import os
 import sys
-import threading
+import shutil
+import tempfile
+import datetime
 import traceback
 import subprocess
-import datetime
 
 from parser import parse_command_line
 from commands import (
     InternalCommand,
     ExitCommand, HelpCommand, SetCommand, CdCommand,
-    DirCommand, EchoCommand, TypeCommand, ClsCommand,
-    MdCommand, TimeCommand,
+    DirCommand, EchoCommand, TypeCommand, MdCommand, TimeCommand,
     ScriptCommand, CmdCommand, ExecutableCommand,
 )
 
-# Set DEBUG = True (or run with --debug) to print full tracebacks on errors
-DEBUG = False
+DEBUG = False   # True = print full tracebacks (python shell.py --debug)
 
-# CMD built-in commands that are not implemented internally.
-# These need shell=True so cmd.exe can resolve them.
-CMD_BUILTINS = {
-    'copy', 'xcopy', 'ren', 'rename', 'move', 'del', 'erase',
-    'rd', 'rmdir', 'ver', 'vol', 'color', 'title', 'attrib',
-    'assoc', 'ftype', 'pushd', 'popd', 'mklink',
-}
+# Commands that exist only inside cmd.exe (there is no .exe file for them)
+CMD_COMMANDS = ["copy", "ren", "rename", "move", "del", "erase", "rd", "rmdir",
+                "mkdir", "cls", "ver", "vol", "title", "color", "start", "date"]
 
 
-# ══════════════════════════════════════════════════════════════════
 class Shell:
-    """
-    Main Shell class.
-
-    Responsibilities:
-      - Input loop (REPL: Read-Eval-Print-Loop)
-      - Command type resolution (internal / script / cmd / exe)
-      - Pipeline execution with true parallelism
-      - stdin and stdout redirect
-      - Ctrl+C handling and error recovery
-    """
 
     def __init__(self):
-        # MY_PATH: semicolon-separated list of directories to search for scripts.
-        # Stored as an environment variable so 'set MY_PATH' can read/change it.
-        shell_dir = os.path.dirname(os.path.abspath(__file__))
-        initial_my_path = os.pathsep.join([
-            os.path.join(shell_dir, 'scripts'),
-            os.path.join(shell_dir, 'scripts2'),
-        ])
-        os.environ.setdefault('MY_PATH', initial_my_path)
+        # MY_PATH = our own "PATH": the folders where we look for .py scripts.
+        # It is an environment variable, so  'set MY_PATH'  shows / changes it.
+        here = os.path.dirname(os.path.abspath(__file__))
+        os.environ.setdefault("MY_PATH", os.pathsep.join([
+            os.path.join(here, "scripts"),
+            os.path.join(here, "scripts2"),
+        ]))
 
-        # Register all internal commands in a dict keyed by name
-        self._internal_commands = {}
-        for cls in [ExitCommand, HelpCommand, SetCommand, CdCommand,
-                    DirCommand, EchoCommand, TypeCommand, ClsCommand,
-                    MdCommand, TimeCommand]:
-            cmd = cls()
-            self._internal_commands[cmd.name] = cmd
+        # All internal commands, by name:  {"dir": DirCommand(), ...}
+        self.internal_commands = {}
+        for cls in [ExitCommand, HelpCommand, SetCommand, CdCommand, DirCommand,
+                    EchoCommand, TypeCommand, MdCommand, TimeCommand]:
+            self.internal_commands[cls.name] = cls()
+        HelpCommand.registry = self.internal_commands   # so 'help' can list them
 
-        # Give HelpCommand access to the full registry so it can list commands
-        HelpCommand.registry = self._internal_commands
+        self.count = 0   # number of commands run (shown in the prompt)
 
-        # Command counter used in the prompt
-        self._cmd_count = 0
-
-    # ══════════════════════════════════════════════════════════════════════════
+    # ------------------------------------------------------------------
     # MAIN LOOP
-    # ══════════════════════════════════════════════════════════════════════════
-
+    # ------------------------------------------------------------------
     def run(self):
-        """Main loop: show prompt, read a line, execute it."""
         print("Welcome to PyShell! Type 'help' for commands, 'exit' to quit.")
         while True:
             try:
-                line = input(self._make_prompt())
+                line = input(self.prompt()).strip()
+                if line:
+                    self.count += 1
+                    self.run_line(line)
             except KeyboardInterrupt:
-                # Ctrl+C while waiting for input - do NOT exit the shell
-                print()
-                continue
+                # Ctrl+C: stop the current command but stay in the shell
+                print("\n[Stopped]")
             except EOFError:
-                # Ctrl+D / end of input stream
+                # End of input (Ctrl+Z, or the input file ended)
                 print("\nGoodbye!")
                 break
-
-            line = line.strip()
-            if not line:
-                continue
-
-            self._cmd_count += 1
-
-            try:
-                self._execute_line(line)
-            except SystemExit:
-                # exit command called sys.exit() - let it propagate
-                raise
             except Exception as e:
-                self._handle_error(e)
+                # Any other error: print a short message, the shell does NOT crash
+                print(f"Error: {e}", file=sys.stderr)
+                if DEBUG:
+                    traceback.print_exc()
 
-    def _make_prompt(self) -> str:
-        """Build the custom prompt: directory, username, time, command number."""
-        cwd = os.getcwd()
-        user = os.environ.get('USERNAME', os.environ.get('USER', 'user'))
+    def prompt(self):
+        """Prompt with the time, user name, command number and current folder."""
+        user = os.environ.get("USERNAME", "user")
         now = datetime.datetime.now().strftime("%H:%M")
-        return f"[{now}] {user}@PyShell #{self._cmd_count}  {cwd}\n> "
+        return f"[{now}] {user}@PyShell #{self.count}  {os.getcwd()}\n> "
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # EXECUTION PIPELINE
-    # ══════════════════════════════════════════════════════════════════════════
+    # ------------------------------------------------------------------
+    # RUN ONE LINE  (a single command is just a pipeline with one part)
+    # ------------------------------------------------------------------
+    def run_line(self, line):
+        parts = parse_command_line(line)
+        # parts = [{'tokens': ['ping', 'x'], 'stdin': None, 'stdout': None}, ...]
 
-    def _execute_line(self, line: str):
-        """Parse and execute one command line."""
-        segments = parse_command_line(line)
-        if not segments:
-            return
+        # 1. Find the command object of every part BEFORE starting anything.
+        #    If one is missing we stop now (nothing is left half-running).
+        commands = []
+        for part in parts:
+            cmd = self.find_command(part["tokens"][0])
+            if cmd is None:
+                return
+            commands.append(cmd)
 
-        if len(segments) == 1:
-            # Single command (may have redirects)
-            self._execute_single(segments[0])
-        else:
-            # Pipeline: multiple commands connected by |
-            self._execute_pipeline(segments)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # SINGLE COMMAND (no pipe)
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _execute_single(self, segment: dict):
-        """
-        Run a single command with redirect support.
-        segment = {'tokens': [...], 'stdin': ..., 'stdout': ...}
-        """
-        tokens = segment['tokens']
-        stdin_file = segment['stdin']
-        stdout_file = segment['stdout']
-
-        cmd_obj = self._resolve_command(tokens[0])
-        args = tokens[1:]
-
-        # Open redirect files
-        f_in  = open(stdin_file,  'r', encoding='utf-8', errors='replace') if stdin_file  else None
-        f_out = open(stdout_file, 'w', encoding='utf-8')                   if stdout_file else None
+        processes = []    # the Popen objects we started
+        open_files = []   # files we opened, to close at the end
+        prev_output = None  # output of the previous command = input of the next
 
         try:
-            result = cmd_obj.execute(args, stdin=f_in, stdout=f_out)
+            # 2. Start every command, connecting each one to the next.
+            for i, cmd in enumerate(commands):
+                part = parts[i]
+                args = part["tokens"][1:]
+                is_last = (i == len(commands) - 1)
 
-            if result is not None:
-                # External process - wait for it to finish
-                try:
-                    result.wait()
-                except KeyboardInterrupt:
-                    result.terminate()
-                    result.wait()
-                    print("\n[Stopped by user]")
-        finally:
-            if f_in:
-                f_in.close()
-            if f_out:
-                f_out.close()
+                # Where does this command READ from?
+                stdin = prev_output                 # previous command in the pipe
+                if part["stdin"]:                   # ... or a  < file
+                    stdin = open(part["stdin"], "r")
+                    open_files.append(stdin)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # PIPELINE  (connecting commands with |)
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _execute_pipeline(self, segments: list):
-        """
-        Run a pipeline of commands in parallel.
-
-        How it works:
-          - External commands (Popen): stdout=subprocess.PIPE -> next command's stdin.
-            All subprocess instances start before any of them finishes (true parallelism).
-          - Internal commands: os.pipe() + thread for writing; the read-end is passed
-            to the next command as its stdin.
-
-        Important: we close the read-end of each pipe in the PARENT process after
-        passing it to the child. This ensures EOF is sent when the writing end closes.
-
-        Redirects:
-          <  - only valid on the first segment
-          >  - only valid on the last segment
-        """
-        n = len(segments)
-        processes  = []   # Popen objects (external commands)
-        threads    = []   # Thread objects (internal commands)
-        open_files = []   # all opened files that must be closed at the end
-
-        prev_read = None  # read-end of the pipe from the previous command
-
-        for i, seg in enumerate(segments):
-            is_last = (i == n - 1)
-            tokens  = seg['tokens']
-
-            cmd_obj = self._resolve_command(tokens[0])
-            args    = tokens[1:]
-
-            # ── stdin ─────────────────────────────────────────────────────
-            if i == 0 and seg['stdin']:
-                # < redirect on the first command
-                f = open(seg['stdin'], 'r', encoding='utf-8', errors='replace')
-                open_files.append(f)
-                eff_stdin = f
-            else:
-                eff_stdin = prev_read  # None if first command with no redirect
-
-            # ── stdout ────────────────────────────────────────────────────
-            if is_last and seg['stdout']:
-                # > redirect on the last command
-                f = open(seg['stdout'], 'w', encoding='utf-8')
-                open_files.append(f)
-                eff_stdout_file = f
-            else:
-                eff_stdout_file = None  # None = terminal (last) or PIPE (middle)
-
-            # ── Execute ───────────────────────────────────────────────────
-            if isinstance(cmd_obj, InternalCommand):
-                # Internal command: run in a thread using os.pipe()
-                if not is_last:
-                    r_fd, w_fd = os.pipe()
-                    r_file = os.fdopen(r_fd, 'r', encoding='utf-8', errors='replace')
-                    w_file = os.fdopen(w_fd, 'w', encoding='utf-8')
+                # Where does this command WRITE to?
+                if part["stdout"]:                  # a  > file
+                    stdout = open(part["stdout"], "w")
+                    open_files.append(stdout)
+                elif is_last:
+                    stdout = None                   # the screen
                 else:
-                    r_file = None
-                    w_file = eff_stdout_file  # None -> sys.stdout
+                    stdout = subprocess.PIPE        # the next command in the pipe
 
-                # Capture loop variables to avoid closure bugs inside a loop
-                _cmd, _args, _sin, _sout = cmd_obj, args, eff_stdin, w_file
-
-                def _run_internal(c=_cmd, a=_args, s_in=_sin, s_out=_sout):
-                    try:
-                        c.execute(a, stdin=s_in, stdout=s_out)
-                    finally:
-                        # Close the write-end to send EOF to the next command
-                        if s_out is not None:
-                            try:
-                                s_out.close()
-                            except Exception:
-                                pass
-                        # Close the stdin (read-end of the previous pipe)
-                        if s_in is not None:
-                            try:
-                                s_in.close()
-                            except Exception:
-                                pass
-
-                t = threading.Thread(target=_run_internal, daemon=True)
-                t.start()
-                threads.append(t)
-
-                if not is_last:
-                    prev_read = r_file
+                if isinstance(cmd, InternalCommand):
+                    prev_output = self.run_internal(cmd, args, stdout, open_files)
                 else:
-                    prev_read = None
+                    proc = cmd.execute(args, stdin=stdin, stdout=stdout)
+                    processes.append(proc)
+                    prev_output = proc.stdout       # None unless stdout was PIPE
 
-            else:
-                # External command: Popen  (ScriptCommand / CmdCommand / ExecutableCommand)
-                if not is_last:
-                    popen_stdout = subprocess.PIPE
-                elif eff_stdout_file:
-                    popen_stdout = eff_stdout_file
-                else:
-                    popen_stdout = None  # -> terminal
+                # The child process now has its own copy of the pipe,
+                # so the shell closes its copy (this is how EOF reaches the reader).
+                if stdin is not None and stdin not in open_files:
+                    stdin.close()
 
-                try:
-                    # Call execute() which creates Popen with the right settings
-                    proc = cmd_obj.execute(args, stdin=eff_stdin, stdout=popen_stdout)
-
-                    if proc is None:
-                        # Command not found (_NotFoundCommand returns None)
-                        prev_read = None
-                    else:
-                        processes.append(proc)
-
-                        # Close the read-end in the parent after the child inherited it.
-                        # This is required so the child receives EOF when writing ends.
-                        if eff_stdin is not None and eff_stdin not in open_files:
-                            try:
-                                eff_stdin.close()
-                            except Exception:
-                                pass
-
-                        prev_read = proc.stdout if not is_last else None
-
-                except (FileNotFoundError, OSError) as e:
-                    print(f"Error: command '{tokens[0]}' not found. ({e})", file=sys.stderr)
-                    prev_read = None
-
-        # ── Wait for everyone to finish ───────────────────────────────────────
-        try:
+            # 3. All commands are running IN PARALLEL. Now wait for them all.
             for proc in processes:
                 proc.wait()
-            for t in threads:
-                t.join()
+
         except KeyboardInterrupt:
+            # Ctrl+C: kill what is still running, then go back to the prompt
             for proc in processes:
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-            print("\n[Pipeline stopped]")
-
-        # ── Close all opened files ────────────────────────────────────────────
-        for f in open_files:
-            try:
+                proc.kill()
+            print("\n[Stopped]")
+        finally:
+            for f in open_files:
                 f.close()
-            except Exception:
-                pass
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # COMMAND RESOLUTION  -  determine command type by priority
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def _resolve_command(self, name: str):
+    def run_internal(self, cmd, args, stdout, open_files):
         """
-        Return the appropriate Command object for the given name.
-        Priority order:
-          1. Internal command
-          2. .py script in MY_PATH
-          3. CMD built-in  (shell=True -> cmd.exe /c)
-          4. External EXE  (Windows PATH)
+        Run an internal command. If its output must go into a pipe, we write it
+        to a temporary file and give that file to the next command as its stdin.
         """
-        lower = name.lower()
+        if stdout is subprocess.PIPE:
+            temp = tempfile.TemporaryFile("w+")
+            open_files.append(temp)
+            cmd.execute(args, stdout=temp)
+            temp.seek(0)          # rewind, so the next command reads from the start
+            return temp
+        cmd.execute(args, stdout=stdout)
+        return None
 
-        # 1. Internal command?
-        if lower in self._internal_commands:
-            return self._internal_commands[lower]
+    # ------------------------------------------------------------------
+    # FINDING A COMMAND
+    # ------------------------------------------------------------------
+    def find_command(self, name):
+        """Return the right Command object for this name, or None if not found."""
+        lower = name.lower()   # commands are case-insensitive: DIR = dir = Dir
 
-        # 2. Python script? (ends with .py)
-        if lower.endswith('.py'):
-            script_path = self._find_script(name)
-            if script_path:
-                return ScriptCommand(script_path)
-            # Not found in MY_PATH - try as a direct path
-            if os.path.isfile(name):
-                return ScriptCommand(name)
-            # Not found anywhere
-            return _NotFoundCommand(name)
+        # 1. Internal command
+        if lower in self.internal_commands:
+            return self.internal_commands[lower]
 
-        # 3. CMD built-in?
-        if lower in CMD_BUILTINS:
+        # 2. Python script: search the MY_PATH folders, one by one
+        if lower.endswith(".py"):
+            for folder in os.environ.get("MY_PATH", "").split(os.pathsep):
+                path = os.path.join(folder, name)
+                if os.path.isfile(path):
+                    return ScriptCommand(name, path)
+            print(f"'{name}': script not found in MY_PATH", file=sys.stderr)
+            return None
+
+        # 3. CMD built-in command
+        if lower in CMD_COMMANDS:
             return CmdCommand(lower)
 
-        # 4. External EXE (subprocess will search the PATH)
-        return ExecutableCommand(name)
+        # 4. A program (.exe). We only CHECK that it exists here;
+        #    Popen itself finds it in the current folder / PATH when it runs.
+        if shutil.which(name):
+            return ExecutableCommand(name)
 
-    def _find_script(self, script_name: str) -> str | None:
-        """
-        Search for a Python script in MY_PATH directories, in order.
-        Returns the full path if found, otherwise None.
-        """
-        my_path = os.environ.get('MY_PATH', '')
-        dirs = my_path.split(os.pathsep)
-        for d in dirs:
-            full = os.path.join(d, script_name)
-            if os.path.isfile(full):
-                return full
+        print(f"'{name}' is not recognized as a command", file=sys.stderr)
         return None
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # ERROR HANDLING
-    # ══════════════════════════════════════════════════════════════════════════
 
-    def _handle_error(self, exc: Exception):
-        """Print a friendly error message. In DEBUG mode also print traceback."""
-        print(f"Error: {exc}", file=sys.stderr)
-        if DEBUG:
-            traceback.print_exc()
-
-
-# ══════════════════════════════════════════════════════════════════
-# NOT-FOUND COMMAND  -  placeholder for unknown .py scripts
-# ══════════════════════════════════════════════════════════════════
-class _NotFoundCommand:
-    """Returned when a .py script cannot be located anywhere in MY_PATH."""
-
-    def __init__(self, name):
-        self.name = name
-
-    def execute(self, args, stdin=None, stdout=None):
-        print(f"'{self.name}': script not found in MY_PATH.", file=sys.stderr)
-        return None
-
-    def build_cmd(self, args):
-        return []
-
-
-# ══════════════════════════════════════════════════════════════════
-# ENTRY POINT
-# ══════════════════════════════════════════════════════════════════
-if __name__ == '__main__':
-    # Enable debug mode with:  python shell.py --debug
-    if '--debug' in sys.argv:
+if __name__ == "__main__":
+    if "--debug" in sys.argv:
         DEBUG = True
-        print("[DEBUG mode enabled]")
-
-    shell = Shell()
     try:
-        shell.run()
+        Shell().run()
     except SystemExit:
-        pass  # normal exit via the 'exit' command
-    except KeyboardInterrupt:
-        print("\nGoodbye!")
+        pass   # the 'exit' command was used

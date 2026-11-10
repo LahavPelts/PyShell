@@ -25,7 +25,6 @@ class ExitCommand(InternalCommand):
     usage = "exit"
 
     def execute(self, args, stdin=None, stdout=None):
-        args = self._clean_args(args)
         print("Goodbye!", file=self._stdout(stdout))
         sys.exit(0)
 
@@ -45,19 +44,6 @@ class EchoCommand(InternalCommand):
 
 
 # ══════════════════════════════════════════════════════════════════
-# CLS
-# ══════════════════════════════════════════════════════════════════
-class ClsCommand(InternalCommand):
-    name = "cls"
-    description = "Clear the screen"
-    usage = "cls"
-
-    def execute(self, args, stdin=None, stdout=None):
-        args = self._clean_args(args)
-        os.system('cls')
-
-
-# ══════════════════════════════════════════════════════════════════
 # TIME
 # ══════════════════════════════════════════════════════════════════
 class TimeCommand(InternalCommand):
@@ -66,7 +52,6 @@ class TimeCommand(InternalCommand):
     usage = "time"
 
     def execute(self, args, stdin=None, stdout=None):
-        args = self._clean_args(args)
         out = self._stdout(stdout)
         now = datetime.datetime.now().strftime("%H:%M:%S")
         print(f"Current time: {now}", file=out)
@@ -197,101 +182,81 @@ class MdCommand(InternalCommand):
 # ══════════════════════════════════════════════════════════════════
 class DirCommand(InternalCommand):
     """
-    List directory contents - implemented with os.listdir / os.walk.
+    List the files in a folder (written in Python, no cmd.exe).
 
     Flags:
-      /s          - recursive (include subdirectories)
-
-    Pattern:
-      *.txt, *.exe  - filter by extension
-
-    Path:
-      c:\\windows         - specific directory
-      c:\\windows\\*.log  - directory + pattern
+      /s  - also look inside all sub-folders
+      /b  - bare format: names only (no date / size)
 
     Examples:
-      dir
-      dir *.txt
-      dir /s
-      dir /s *.exe
-      dir c:\\windows\\*.log /s
+      dir            dir *.txt          dir /s *.py
+      dir /b         dir c:\\windows\\*.log /s
     """
     name = "dir"
     description = "List directory contents"
-    usage = "dir [path] [*.pattern] [/s]"
+    usage = "dir [folder][*.pattern] [/s] [/b]"
 
     def execute(self, args, stdin=None, stdout=None):
-        args = self._clean_args(args)
         out = self._stdout(stdout)
-
         recursive = False
-        pattern = '*'
-        search_path = '.'
+        bare = False
+        folder = "."
+        pattern = "*"
 
-        remaining = []
-        for a in args:
-            if a.lower() == '/s':
+        # 1. Read the arguments (any order)
+        for a in self._clean_args(args):
+            if a.lower() == "/s":
                 recursive = True
-            else:
-                remaining.append(a)
+            elif a.lower() == "/b":
+                bare = True
+            elif "*" in a or "?" in a or os.path.isfile(a):            # c:\windows\*.log
+                folder = os.path.dirname(a) or "."
+                pattern = os.path.basename(a)
+            else:                                   # c:\windows
+                folder = a
 
-        if remaining:
-            arg = remaining[0]
-            # If the path contains a wildcard, split into directory and pattern
-            if '*' in arg or '?' in arg:
-                search_path = os.path.dirname(arg) or '.'
-                pattern = os.path.basename(arg)
-            else:
-                search_path = arg
-
-        if not os.path.exists(search_path):
-            print(f"dir: path not found: '{search_path}'", file=sys.stderr)
+        if not os.path.isdir(folder):
+            print(f"dir: folder not found: {folder}", file=sys.stderr)
             return
 
-        def print_one_dir(path, pat):
-            """Print the contents of a single directory."""
-            try:
-                entries = sorted(os.listdir(path))
-            except PermissionError:
-                print(f"\n  [access denied: {path}]", file=out)
-                return
-
-            print(f"\n Directory: {os.path.abspath(path)}\n", file=out)
-            dirs_count = 0
-            files_count = 0
-            total_size = 0
-
-            for entry in entries:
-                full_path = os.path.join(path, entry)
-                is_dir = os.path.isdir(full_path)
-
-                # Pattern filter: directories are always shown, files are filtered
-                if not is_dir and not fnmatch.fnmatch(entry.lower(), pat.lower()):
-                    continue
-
-                try:
-                    st = os.stat(full_path)
-                    mtime = datetime.datetime.fromtimestamp(st.st_mtime)
-                    mtime_str = mtime.strftime("%d/%m/%Y  %H:%M")
-
-                    if is_dir:
-                        dirs_count += 1
-                        print(f"{mtime_str}    <DIR>          {entry}", file=out)
-                    else:
-                        size = st.st_size
-                        files_count += 1
-                        total_size += size
-                        print(f"{mtime_str}    {size:>14,}  {entry}", file=out)
-                except OSError:
-                    print(f"  [error accessing: {entry}]", file=out)
-
-            print(f"\n  {files_count} file(s)  |  {dirs_count} dir(s)  |  {total_size:,} bytes", file=out)
-
+        # 2. Which folders to list: just this one, or (with /s) all sub-folders too
         if recursive:
-            for root, dirs, files in os.walk(search_path):
-                print_one_dir(root, pattern)
+            folders = [root for root, dirs, files in os.walk(folder)]
         else:
-            print_one_dir(search_path, pattern)
+            folders = [folder]
+
+        # 3. List them
+        count = 0
+        for f in folders:
+            count += self.list_folder(f, pattern, bare, recursive, out)
+        if not bare:
+            print(f"\n  {count} item(s) found", file=out)
+
+    def list_folder(self, folder, pattern, bare, full_path, out):
+        """Print the entries of ONE folder that match the pattern. Returns how many."""
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:                             # e.g. access denied
+            return 0
+        names = [n for n in names if fnmatch.fnmatch(n.lower(), pattern.lower())]
+        if not names:
+            return 0                                # skip empty folders, like cmd
+
+        if not bare:
+            print(f"\n Directory of {os.path.abspath(folder)}\n", file=out)
+        for name in names:
+            path = os.path.join(folder, name)
+            if bare:
+                print(os.path.abspath(path) if full_path else name, file=out)
+                continue
+            try:
+                info = os.stat(path)
+            except OSError:
+                continue
+            date = datetime.datetime.fromtimestamp(info.st_mtime).strftime("%d/%m/%Y  %H:%M")
+            size = "<DIR>" if os.path.isdir(path) else f"{info.st_size:,}"
+            print(f"{date}  {size:>14}  {name}", file=out)
+        return len(names)
 
 
 # ══════════════════════════════════════════════════════════════════

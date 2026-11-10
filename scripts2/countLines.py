@@ -17,7 +17,10 @@ Examples:
 import sys
 
 count = 0
-for line in sys.stdin:
-    count += 1
+try:
+    for line in sys.stdin:
+        count += 1
+except KeyboardInterrupt:
+    pass  # Ctrl+C: stop reading and print what we counted so far
 
 print(f"Total lines: {count}")
