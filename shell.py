@@ -12,7 +12,7 @@ Files:
 
 How a command name is found (in this order):
   1. Internal command   (dir, cd, set...)  -> runs inside Python, no new process
-  2. Python script      (hello.py)         -> searched in the MY_PATH folders
+  2. Python script      (hello.py / hello) -> searched in the MY_PATH folders
   3. CMD built-in       (copy, ren...)     -> runs with  cmd.exe /c
   4. Program            (ping, notepad...) -> Windows finds the .exe in PATH
 """
@@ -182,12 +182,14 @@ class Shell:
         if lower in self.internal_commands:
             return self.internal_commands[lower]
 
-        # 2. Python script: search the MY_PATH folders, one by one
+        # 2. Python script: search the MY_PATH folders, one by one.
+        #    "hexdump.py" and just "HexDump" both find hexdump.py
+        script_name = name if lower.endswith(".py") else name + ".py"
+        for folder in os.environ.get("MY_PATH", "").split(os.pathsep):
+            path = os.path.join(folder, script_name)
+            if os.path.isfile(path):
+                return ScriptCommand(name, path)
         if lower.endswith(".py"):
-            for folder in os.environ.get("MY_PATH", "").split(os.pathsep):
-                path = os.path.join(folder, name)
-                if os.path.isfile(path):
-                    return ScriptCommand(name, path)
             print(f"'{name}': script not found in MY_PATH", file=sys.stderr)
             return None
 
